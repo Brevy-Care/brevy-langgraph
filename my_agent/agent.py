@@ -1,52 +1,71 @@
-from typing import TypedDict, Literal
+from langchain_core.messages import SystemMessage
+from langchain_openai import ChatOpenAI
 
-from langgraph.graph import StateGraph, END
-from my_agent.utils.nodes import call_model, should_continue, tool_node
-from my_agent.utils.state import AgentState
-
-
-# Define the config
-class GraphConfig(TypedDict):
-    model_name: Literal["anthropic", "openai"]
+from langgraph.graph import START, StateGraph, MessagesState
+from langgraph.prebuilt import tools_condition, ToolNode
 
 
-# Define a new graph
-workflow = StateGraph(AgentState, config_schema=GraphConfig)
+import json
 
-# Define the two nodes we will cycle between
-workflow.add_node("agent", call_model)
-workflow.add_node("action", tool_node)
 
-# Set the entrypoint as `agent`
-# This means that this node is the first one called
-workflow.set_entry_point("agent")
+def add(a: int, b: int) -> int:
+    """Adds a and b.
 
-# We now add a conditional edge
-workflow.add_conditional_edges(
-    # First, we define the start node. We use `agent`.
-    # This means these are the edges taken after the `agent` node is called.
-    "agent",
-    # Next, we pass in the function that will determine which node is called next.
-    should_continue,
-    # Finally we pass in a mapping.
-    # The keys are strings, and the values are other nodes.
-    # END is a special node marking that the graph should finish.
-    # What will happen is we will call `should_continue`, and then the output of that
-    # will be matched against the keys in this mapping.
-    # Based on which one it matches, that node will then be called.
-    {
-        # If `tools`, then we call the tool node.
-        "continue": "action",
-        # Otherwise we finish.
-        "end": END,
-    },
+    Args:
+        a: first int
+        b: second int
+    """
+    return a + b
+
+
+def multiply(a: int, b: int) -> int:
+    """Multiplies a and b.
+
+    Args:
+        a: first int
+        b: second int
+    """
+    return a * b
+
+
+
+def divide(a: int, b: int) -> float:
+    """Divide a and b.
+
+    Args:
+        a: first int
+        b: second int
+    """
+    return a / b
+
+tools = [add, multiply, divide]
+
+# Define LLM with bound tools
+llm = ChatOpenAI(model="gpt-4o")
+llm_with_tools = llm.bind_tools(tools)
+
+# System message
+sys_msg = SystemMessage(content="""
+You are a helpful assistant tasked with helping users query 
+""")
+
+# Node
+def assistant(state: MessagesState):
+   return {"messages": [llm_with_tools.invoke([sys_msg] + state["messages"])]}
+
+
+# Build graph
+builder = StateGraph(MessagesState)
+builder.add_node("assistant", assistant)
+builder.add_node("tools", ToolNode(tools))
+builder.add_edge(START, "assistant")
+builder.add_conditional_edges(
+    "assistant",
+    # If the latest message (result) from assistant is a tool call -> tools_condition routes to tools
+    # If the latest message (result) from assistant is a not a tool call -> tools_condition routes to END
+    tools_condition,
 )
+builder.add_edge("tools", "assistant")
 
-# We now add a normal edge from `tools` to `agent`.
-# This means that after `tools` is called, `agent` node is called next.
-workflow.add_edge("action", "agent")
-
-# Finally, we compile it!
-# This compiles it into a LangChain Runnable,
-# meaning you can use it as you would any other runnable
-graph = workflow.compile()
+# Compile graph
+graph = builder.compile()
